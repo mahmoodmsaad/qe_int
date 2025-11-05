@@ -142,6 +142,7 @@ function Scene({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmo
 function Panel({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmoMode }) {
   const selected = atoms.find((a) => a.id === selectedId) || null
   const [xyzText, setXyzText] = useState('')
+  const fileInputRef = useRef(null)
   const [nx, setNx] = useState(1), [ny, setNy] = useState(1), [nz, setNz] = useState(1)
   const [a1, setA1] = useState([3.615, 0, 0])
   const [a2, setA2] = useState([0, 3.615, 0])
@@ -156,9 +157,55 @@ function Panel({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmo
   const changeColor = (c) => selected && setAtoms(atoms.map((a) => a.id === selected.id ? { ...a, color: c } : a))
   const changeElement = (elem) => selected && setAtoms(atoms.map((a) => a.id === selected.id ? { ...a, element: elem, color: ELEMENT_COLORS[elem] || a.color } : a))
 
-  const loadXYZFromText = () => { const parsed = parseXYZ(xyzText); if (parsed.length) setAtoms(parsed) }
-  const exportXYZToDisk = async () => { const blob = toXYZ(atoms); if (window.api?.saveXYZ) await window.api.saveXYZ(blob) }
-  const openXYZFromDisk = async () => { if (!window.api?.openXYZ) return; const res = await window.api.openXYZ(); if (res?.ok) { setXyzText(res.content); const parsed = parseXYZ(res.content); if (parsed.length) setAtoms(parsed) } }
+  const loadXYZFromText = () => {
+    const parsed = parseXYZ(xyzText)
+    if (parsed.length) setAtoms(parsed)
+  }
+  const exportXYZToDisk = async () => {
+    const content = toXYZ(atoms)
+    if (window.api?.saveXYZ) {
+      await window.api.saveXYZ(content)
+      return
+    }
+
+    const blob = new Blob([content], { type: 'text/plain' })
+    const url = URL.createObjectURL(blob)
+    const link = document.createElement('a')
+    link.href = url
+    link.download = 'structure.xyz'
+    document.body.appendChild(link)
+    link.click()
+    document.body.removeChild(link)
+    URL.revokeObjectURL(url)
+  }
+  const openXYZFromDisk = async () => {
+    if (window.api?.openXYZ) {
+      const res = await window.api.openXYZ()
+      if (res?.ok) {
+        setXyzText(res.content)
+        const parsed = parseXYZ(res.content)
+        if (parsed.length) setAtoms(parsed)
+      }
+      return
+    }
+
+    fileInputRef.current?.click()
+  }
+
+  const onFileInputChange = (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      const text = typeof reader.result === 'string' ? reader.result : ''
+      setXyzText(text)
+      const parsed = parseXYZ(text)
+      if (parsed.length) setAtoms(parsed)
+    }
+    reader.readAsText(file)
+    event.target.value = ''
+  }
 
   const buildSupercell = () => {
     const A1 = a1.map(Number), A2 = a2.map(Number), A3 = a3.map(Number)
@@ -199,6 +246,13 @@ function Panel({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmo
 
       <div className="section">
         <h3>Import / Export (.xyz)</h3>
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".xyz,.txt"
+          style={{ display: 'none' }}
+          onChange={onFileInputChange}
+        />
         <div className="row" style={{ gap: 6, marginBottom: 6 }}>
           <button onClick={openXYZFromDisk}>Open .xyz…</button>
           <button onClick={exportXYZToDisk}>Save .xyz…</button>
