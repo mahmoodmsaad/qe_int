@@ -1,12 +1,84 @@
-import React, { useRef, useState, useEffect, Suspense } from 'react'
-import { Canvas, useThree } from '@react-three/fiber'
-import { OrbitControls, TransformControls, Grid, StatsGl } from '@react-three/drei'
+import React, { useRef, useState, useEffect, Suspense, useMemo } from 'react'
+import { Canvas } from '@react-three/fiber'
+import { OrbitControls, TransformControls, Grid, StatsGl, Line } from '@react-three/drei'
 
 const ELEMENT_COLORS = {
-  H: '#ffffff', C: '#8c8c8c', N: '#3f51b5', O: '#e53935', P: '#ff9800', S: '#fbc02d',
-  Cu: '#b87333', Ni: '#7f7f7f', Pt: '#d0d0e0'
+  H: '#ffffff',
+  C: '#8c8c8c',
+  N: '#3f51b5',
+  O: '#e53935',
+  P: '#ff9800',
+  S: '#fbc02d',
+  Cu: '#b87333',
+  Ni: '#7f7f7f',
+  Pt: '#d0d0e0',
+  Al: '#f0f8ff',
+  Si: '#c0c0c0',
+  Fe: '#cd7f32',
+  Co: '#4c6ef5',
+  Zn: '#9da7b1',
+  Mo: '#8d99ae',
+  W: '#adb5bd',
+  Ti: '#979dac',
+  V: '#6c757d',
+  Cr: '#90a4ae'
 }
-const ELEMENT_RADII = { H: 0.25, C: 0.35, N: 0.33, O: 0.32, P: 0.4, S: 0.4, Cu: 0.6, Ni: 0.58, Pt: 0.62 }
+
+const ELEMENT_RADII = {
+  H: 0.25,
+  C: 0.35,
+  N: 0.33,
+  O: 0.32,
+  P: 0.4,
+  S: 0.4,
+  Cu: 0.6,
+  Ni: 0.58,
+  Pt: 0.62,
+  Al: 0.53,
+  Si: 0.42,
+  Fe: 0.55,
+  Co: 0.54,
+  Zn: 0.57,
+  Mo: 0.6,
+  W: 0.62,
+  Ti: 0.52,
+  V: 0.5,
+  Cr: 0.52
+}
+
+const ELEMENT_MASSES = {
+  H: 1.008,
+  C: 12.011,
+  N: 14.007,
+  O: 15.999,
+  P: 30.974,
+  S: 32.06,
+  Cu: 63.546,
+  Ni: 58.6934,
+  Pt: 195.084,
+  Al: 26.9815385,
+  Si: 28.085,
+  Fe: 55.845,
+  Co: 58.933,
+  Zn: 65.38,
+  Mo: 95.95,
+  W: 183.84,
+  Ti: 47.867,
+  V: 50.9415,
+  Cr: 51.9961
+}
+
+function downloadTextFile(filename, content) {
+  const blob = new Blob([content], { type: 'text/plain' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+}
 
 function parseXYZ(xyzText) {
   try {
@@ -24,9 +96,9 @@ function parseXYZ(xyzText) {
       if ([x, y, z].some((v) => Number.isNaN(v))) continue
       atoms.push({ id: id++, element: elem, pos: [x, y, z], color: ELEMENT_COLORS[elem] || '#9e9e9e' })
     }
-    return atoms
+    return { atoms, lattice: null }
   } catch {
-    return []
+    return { atoms: [], lattice: null }
   }
 }
 
@@ -39,15 +111,171 @@ function toXYZ(atoms) {
   return lines.join('\n')
 }
 
+function deg2rad(deg) {
+  return (deg * Math.PI) / 180
+}
+
+function latticeFromParameters(a, b, c, alpha, beta, gamma) {
+  if (!a || !b || !c || !alpha || !beta || !gamma) return null
+  const cosA = Math.cos(deg2rad(alpha))
+  const cosB = Math.cos(deg2rad(beta))
+  const cosG = Math.cos(deg2rad(gamma))
+  const sinG = Math.sin(deg2rad(gamma))
+  if (Math.abs(sinG) < 1e-6) return null
+  const a1 = [a, 0, 0]
+  const a2 = [b * cosG, b * sinG, 0]
+  const a3x = c * cosB
+  const a3y = c * (cosA - cosB * cosG) / sinG
+  const a3zSquared = c * c - a3x * a3x - a3y * a3y
+  const a3z = a3zSquared > 0 ? Math.sqrt(a3zSquared) : 0
+  return { a1, a2, a3: [a3x, a3y, a3z] }
+}
+
+function multiplyMatrixVector(matrix, vector) {
+  return [
+    matrix[0][0] * vector[0] + matrix[0][1] * vector[1] + matrix[0][2] * vector[2],
+    matrix[1][0] * vector[0] + matrix[1][1] * vector[1] + matrix[1][2] * vector[2],
+    matrix[2][0] * vector[0] + matrix[2][1] * vector[1] + matrix[2][2] * vector[2]
+  ]
+}
+
+function parseCIF(text) {
+  try {
+    const cleaned = text
+      .replace(/#.*/g, '')
+      .split(/\r?\n/)
+      .map((line) => line.trim())
+    let a = null, b = null, c = null, alpha = null, beta = null, gamma = null
+    const atoms = []
+    let id = 1
+    const loopData = []
+    for (let i = 0; i < cleaned.length; i++) {
+      const line = cleaned[i]
+      if (!line) continue
+      const lower = line.toLowerCase()
+      if (lower.startsWith('_cell_length_a')) a = parseFloat(line.split(/\s+/).pop())
+      else if (lower.startsWith('_cell_length_b')) b = parseFloat(line.split(/\s+/).pop())
+      else if (lower.startsWith('_cell_length_c')) c = parseFloat(line.split(/\s+/).pop())
+      else if (lower.startsWith('_cell_angle_alpha')) alpha = parseFloat(line.split(/\s+/).pop())
+      else if (lower.startsWith('_cell_angle_beta')) beta = parseFloat(line.split(/\s+/).pop())
+      else if (lower.startsWith('_cell_angle_gamma')) gamma = parseFloat(line.split(/\s+/).pop())
+      else if (lower === 'loop_') {
+        const headers = []
+        i++
+        while (i < cleaned.length && cleaned[i]?.startsWith('_')) {
+          headers.push(cleaned[i])
+          i++
+        }
+        const rows = []
+        while (i < cleaned.length && cleaned[i] && !cleaned[i].startsWith('_') && cleaned[i].toLowerCase() !== 'loop_') {
+          rows.push(cleaned[i])
+          i++
+        }
+        i--
+        loopData.push({ headers, rows })
+      }
+    }
+
+    const lattice = latticeFromParameters(a, b, c, alpha, beta, gamma)
+    const latticeMatrix = lattice ? [lattice.a1, lattice.a2, lattice.a3] : null
+
+    for (const loop of loopData) {
+      const lowerHeaders = loop.headers.map((h) => h.toLowerCase())
+      const fractXIndex = lowerHeaders.findIndex((h) => h.includes('atom_site_fract_x'))
+      const fractYIndex = lowerHeaders.findIndex((h) => h.includes('atom_site_fract_y'))
+      const fractZIndex = lowerHeaders.findIndex((h) => h.includes('atom_site_fract_z'))
+      const cartXIndex = lowerHeaders.findIndex((h) => h.includes('atom_site_cartn_x'))
+      const cartYIndex = lowerHeaders.findIndex((h) => h.includes('atom_site_cartn_y'))
+      const cartZIndex = lowerHeaders.findIndex((h) => h.includes('atom_site_cartn_z'))
+      const typeIndex = lowerHeaders.findIndex((h) => h.includes('atom_site_type_symbol'))
+      const labelIndex = lowerHeaders.findIndex((h) => h.includes('atom_site_label'))
+      if (fractXIndex === -1 && cartXIndex === -1) continue
+      for (const row of loop.rows) {
+        const tokens = row.match(/'(?:[^']*)'|"(?:[^"]*)"|\S+/g)
+        if (!tokens) continue
+        const elementToken = tokens[typeIndex !== -1 ? typeIndex : labelIndex]
+        if (!elementToken) continue
+        const elem = elementToken.replace(/["']/g, '').replace(/[^A-Za-z]/g, '')
+        if (!elem) continue
+        let position = null
+        if (fractXIndex !== -1 && fractYIndex !== -1 && fractZIndex !== -1 && latticeMatrix) {
+          const fx = parseFloat(tokens[fractXIndex])
+          const fy = parseFloat(tokens[fractYIndex])
+          const fz = parseFloat(tokens[fractZIndex])
+          if ([fx, fy, fz].some((v) => Number.isNaN(v))) continue
+          position = multiplyMatrixVector(latticeMatrix, [fx, fy, fz])
+        } else if (cartXIndex !== -1 && cartYIndex !== -1 && cartZIndex !== -1) {
+          const x = parseFloat(tokens[cartXIndex])
+          const y = parseFloat(tokens[cartYIndex])
+          const z = parseFloat(tokens[cartZIndex])
+          if ([x, y, z].some((v) => Number.isNaN(v))) continue
+          position = [x, y, z]
+        }
+        if (!position) continue
+        atoms.push({ id: id++, element: elem, pos: position, color: ELEMENT_COLORS[elem] || '#9e9e9e' })
+      }
+    }
+
+    return { atoms, lattice: lattice || null }
+  } catch {
+    return { atoms: [], lattice: null }
+  }
+}
+
+function toQuantumEspressoInput(atoms, lattice, { prefix = 'structure', calculation = 'scf', pseudoSuffix = '.UPF' } = {}) {
+  const nat = atoms.length
+  const species = Array.from(new Set(atoms.map((a) => a.element)))
+  const ntyp = species.length
+  const lines = []
+  lines.push('&CONTROL')
+  lines.push(`  calculation = '${calculation}',`)
+  lines.push(`  prefix = '${prefix}',`)
+  lines.push("  outdir = './out'")
+  lines.push('/')
+  lines.push('&SYSTEM')
+  lines.push('  ibrav = 0,')
+  lines.push(`  nat = ${nat},`)
+  lines.push(`  ntyp = ${ntyp},`)
+  lines.push('  ecutwfc = 60,')
+  lines.push('  ecutrho = 480')
+  lines.push('/')
+  lines.push('&ELECTRONS')
+  lines.push('  conv_thr = 1.0d-8')
+  lines.push('/')
+  lines.push('ATOMIC_SPECIES')
+  for (const el of species) {
+    const mass = ELEMENT_MASSES[el] ?? 50
+    const pseudo = `${el}${pseudoSuffix}`
+    lines.push(`${el} ${mass.toFixed(4)} ${pseudo}`)
+  }
+  if (lattice) {
+    lines.push('CELL_PARAMETERS angstrom')
+    lines.push(lattice.a1.map((v) => v.toFixed(6)).join(' '))
+    lines.push(lattice.a2.map((v) => v.toFixed(6)).join(' '))
+    lines.push(lattice.a3.map((v) => v.toFixed(6)).join(' '))
+  } else {
+    lines.push('! CELL_PARAMETERS missing - define lattice vectors if needed')
+  }
+  lines.push('ATOMIC_POSITIONS angstrom')
+  for (const atom of atoms) {
+    lines.push(`${atom.element} ${atom.pos.map((v) => v.toFixed(6)).join(' ')}`)
+  }
+  return lines.join('\n')
+}
+
 function makeSupercell(atoms, a1, a2, a3, nx, ny, nz) {
   const out = []
   let id = 1
   for (let i = 0; i < nx; i++) {
     for (let j = 0; j < ny; j++) {
       for (let k = 0; k < nz; k++) {
-        const shift = [ i*a1[0] + j*a2[0] + k*a3[0], i*a1[1] + j*a2[1] + k*a3[1], i*a1[2] + j*a2[2] + k*a3[2] ]
+        const shift = [
+          i * a1[0] + j * a2[0] + k * a3[0],
+          i * a1[1] + j * a2[1] + k * a3[1],
+          i * a1[2] + j * a2[2] + k * a3[2]
+        ]
         for (const a of atoms) {
-          out.push({ id: id++, element: a.element, pos: [a.pos[0]+shift[0], a.pos[1]+shift[1], a.pos[2]+shift[2]], color: a.color })
+          out.push({ id: id++, element: a.element, pos: [a.pos[0] + shift[0], a.pos[1] + shift[1], a.pos[2] + shift[2]], color: a.color })
         }
       }
     }
@@ -55,32 +283,64 @@ function makeSupercell(atoms, a1, a2, a3, nx, ny, nz) {
   return out
 }
 
-function AtomMesh({ atom, selected, onPointerDown }) {
-  const radius = ELEMENT_RADII[atom.element] || 0.4
+function AtomMesh({ atom, selected, onPointerDown, atomScale }) {
+  const baseRadius = ELEMENT_RADII[atom.element] || 0.4
+  const radius = Math.max(0.05, baseRadius * atomScale)
   return (
     <mesh position={atom.pos} onPointerDown={(e) => { e.stopPropagation(); onPointerDown(atom.id) }}>
-      <sphereGeometry args={[radius, 24, 24]} />
+      <sphereGeometry args={[radius, 32, 32]} />
       <meshStandardMaterial color={selected ? '#00e5ff' : atom.color} metalness={0.1} roughness={0.4} />
     </mesh>
   )
 }
 
-function Atoms({ atoms, selectedId, setSelectedId, attachTransform }) {
+function Atoms({ atoms, selectedId, setSelectedId, attachTransform, atomScale }) {
   const groupRef = useRef()
-  const { } = useThree()
 
   useEffect(() => {
     if (!attachTransform.current || !groupRef.current) return
     const obj = groupRef.current.children.find((c) => c.userData && c.userData.atomId === selectedId)
     if (obj) attachTransform.current.attach(obj)
-  }, [selectedId, atoms])
+  }, [selectedId, atoms, attachTransform])
 
   return (
     <group ref={groupRef}>
       {atoms.map((a) => (
         <group key={a.id} position={a.pos} userData={{ atomId: a.id }}>
-          <AtomMesh atom={a} selected={selectedId === a.id} onPointerDown={(id) => setSelectedId(id)} />
+          <AtomMesh atom={a} selected={selectedId === a.id} onPointerDown={(id) => setSelectedId(id)} atomScale={atomScale} />
         </group>
+      ))}
+    </group>
+  )
+}
+
+function CellOutline({ lattice }) {
+  const lines = useMemo(() => {
+    if (!lattice) return []
+    const { a1, a2, a3 } = lattice
+    const p0 = [0, 0, 0]
+    const p1 = a1
+    const p2 = a2
+    const p3 = a3
+    const p12 = [a1[0] + a2[0], a1[1] + a2[1], a1[2] + a2[2]]
+    const p13 = [a1[0] + a3[0], a1[1] + a3[1], a1[2] + a3[2]]
+    const p23 = [a2[0] + a3[0], a2[1] + a3[1], a2[2] + a3[2]]
+    const p123 = [a1[0] + a2[0] + a3[0], a1[1] + a2[1] + a3[1], a1[2] + a2[2] + a3[2]]
+    return [
+      [p0, p1], [p0, p2], [p0, p3],
+      [p1, p12], [p1, p13],
+      [p2, p12], [p2, p23],
+      [p3, p13], [p3, p23],
+      [p12, p123], [p13, p123], [p23, p123]
+    ]
+  }, [lattice])
+
+  if (!lines.length) return null
+
+  return (
+    <group>
+      {lines.map((points, idx) => (
+        <Line key={idx} points={points} color="#64b5f6" lineWidth={1.5} transparent opacity={0.7} />
       ))}
     </group>
   )
@@ -96,7 +356,7 @@ function Lights() {
   )
 }
 
-function Scene({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmoMode }) {
+function Scene({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmoMode, lattice, atomScale }) {
   const transformRef = useRef()
 
   useEffect(() => {
@@ -130,8 +390,9 @@ function Scene({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmo
       <Grid infiniteGrid cellSize={1} sectionColor="white" sectionSize={10} fadeDistance={60} position={[0, -2, 0]} />
       <Lights />
       <Suspense fallback={null}>
-        <Atoms atoms={atoms} selectedId={selectedId} setSelectedId={setSelectedId} attachTransform={transformRef} />
+        <Atoms atoms={atoms} selectedId={selectedId} setSelectedId={setSelectedId} attachTransform={transformRef} atomScale={atomScale} />
       </Suspense>
+      <CellOutline lattice={lattice} />
       <TransformControls ref={transformRef} mode={gizmoMode} showX showY showZ enabled={!!selectedId} />
       <OrbitControls makeDefault enablePan enableRotate enableZoom />
       <StatsGl />
@@ -139,13 +400,17 @@ function Scene({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmo
   )
 }
 
-function Panel({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmoMode }) {
+function Panel({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmoMode, lattice, setLattice, atomScale, setAtomScale }) {
   const selected = atoms.find((a) => a.id === selectedId) || null
   const [xyzText, setXyzText] = useState('')
+  const [cifText, setCifText] = useState('')
+  const [qeText, setQeText] = useState('')
+  const [qePrefix, setQePrefix] = useState('structure')
+  const [qeCalculation, setQeCalculation] = useState('scf')
+  const [qePseudoSuffix, setQePseudoSuffix] = useState('.UPF')
+  const xyzFileInputRef = useRef(null)
+  const cifFileInputRef = useRef(null)
   const [nx, setNx] = useState(1), [ny, setNy] = useState(1), [nz, setNz] = useState(1)
-  const [a1, setA1] = useState([3.615, 0, 0])
-  const [a2, setA2] = useState([0, 3.615, 0])
-  const [a3, setA3] = useState([0, 0, 3.615])
 
   const addAtom = () => {
     const id = atoms.length ? Math.max(...atoms.map((a) => a.id)) + 1 : 1
@@ -156,16 +421,137 @@ function Panel({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmo
   const changeColor = (c) => selected && setAtoms(atoms.map((a) => a.id === selected.id ? { ...a, color: c } : a))
   const changeElement = (elem) => selected && setAtoms(atoms.map((a) => a.id === selected.id ? { ...a, element: elem, color: ELEMENT_COLORS[elem] || a.color } : a))
 
-  const loadXYZFromText = () => { const parsed = parseXYZ(xyzText); if (parsed.length) setAtoms(parsed) }
-  const exportXYZToDisk = async () => { const blob = toXYZ(atoms); if (window.api?.saveXYZ) await window.api.saveXYZ(blob) }
-  const openXYZFromDisk = async () => { if (!window.api?.openXYZ) return; const res = await window.api.openXYZ(); if (res?.ok) { setXyzText(res.content); const parsed = parseXYZ(res.content); if (parsed.length) setAtoms(parsed) } }
+  const loadXYZFromText = () => {
+    const parsed = parseXYZ(xyzText)
+    if (parsed.atoms.length) {
+      setAtoms(parsed.atoms)
+      setSelectedId(null)
+    }
+  }
+
+  const exportXYZToDisk = async () => {
+    const content = toXYZ(atoms)
+    if (window.api?.saveXYZ) {
+      await window.api.saveXYZ(content)
+      return
+    }
+    downloadTextFile('structure.xyz', content)
+  }
+
+  const openXYZFromDisk = async () => {
+    if (window.api?.openXYZ) {
+      const res = await window.api.openXYZ()
+      if (res?.ok) {
+        setXyzText(res.content)
+        const parsed = parseXYZ(res.content)
+        if (parsed.atoms.length) {
+          setAtoms(parsed.atoms)
+          setSelectedId(null)
+        }
+      }
+      return
+    }
+    xyzFileInputRef.current?.click()
+  }
+
+  const onXYZFileInputChange = (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    const reader = new FileReader()
+    reader.onload = () => {
+      const text = typeof reader.result === 'string' ? reader.result : ''
+      setXyzText(text)
+      const parsed = parseXYZ(text)
+      if (parsed.atoms.length) {
+        setAtoms(parsed.atoms)
+        setSelectedId(null)
+      }
+    }
+    reader.readAsText(file)
+    event.target.value = ''
+  }
+
+  const loadCIFFromText = () => {
+    const parsed = parseCIF(cifText)
+    if (parsed.atoms.length) {
+      setAtoms(parsed.atoms)
+      if (parsed.lattice) setLattice(parsed.lattice)
+      setSelectedId(null)
+    }
+  }
+
+  const openCIFFromDisk = async () => {
+    if (window.api?.openCIF) {
+      const res = await window.api.openCIF()
+      if (res?.ok) {
+        setCifText(res.content)
+        const parsed = parseCIF(res.content)
+        if (parsed.atoms.length) {
+          setAtoms(parsed.atoms)
+          if (parsed.lattice) setLattice(parsed.lattice)
+          setSelectedId(null)
+        }
+      }
+      return
+    }
+    cifFileInputRef.current?.click()
+  }
+
+  const onCIFFileInputChange = (event) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      const text = typeof reader.result === 'string' ? reader.result : ''
+      setCifText(text)
+      const parsed = parseCIF(text)
+      if (parsed.atoms.length) {
+        setAtoms(parsed.atoms)
+        if (parsed.lattice) setLattice(parsed.lattice)
+        setSelectedId(null)
+      }
+    }
+    reader.readAsText(file)
+    event.target.value = ''
+  }
 
   const buildSupercell = () => {
-    const A1 = a1.map(Number), A2 = a2.map(Number), A3 = a3.map(Number)
-    const nxN = Math.max(1, Number(nx)|0), nyN = Math.max(1, Number(ny)|0), nzN = Math.max(1, Number(nz)|0)
+    const A1 = lattice?.a1 ?? [1, 0, 0]
+    const A2 = lattice?.a2 ?? [0, 1, 0]
+    const A3 = lattice?.a3 ?? [0, 0, 1]
+    const nxN = Math.max(1, Number(nx) | 0)
+    const nyN = Math.max(1, Number(ny) | 0)
+    const nzN = Math.max(1, Number(nz) | 0)
     const replicated = makeSupercell(atoms, A1, A2, A3, nxN, nyN, nzN)
     setAtoms(replicated.map((a, idx) => ({ ...a, id: idx + 1 })))
     setSelectedId(null)
+  }
+
+  const setLatticeComponent = (vector, index, value) => {
+    setLattice((prev) => {
+      const base = prev ?? { a1: [0, 0, 0], a2: [0, 0, 0], a3: [0, 0, 0] }
+      const updatedVector = base[vector].map((v, i) => (i === index ? Number(value) || 0 : v))
+      return { ...base, [vector]: updatedVector }
+    })
+  }
+
+  const generateQEInput = () => {
+    const text = toQuantumEspressoInput(atoms, lattice, {
+      prefix: qePrefix || 'structure',
+      calculation: qeCalculation || 'scf',
+      pseudoSuffix: qePseudoSuffix || '.UPF'
+    })
+    setQeText(text)
+  }
+
+  const exportQEToDisk = () => {
+    const content = (qeText.trim() ? qeText : toQuantumEspressoInput(atoms, lattice, {
+      prefix: qePrefix || 'structure',
+      calculation: qeCalculation || 'scf',
+      pseudoSuffix: qePseudoSuffix || '.UPF'
+    }))
+    downloadTextFile(`${qePrefix || 'structure'}.in`, content)
   }
 
   return (
@@ -198,7 +584,31 @@ function Panel({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmo
       </div>
 
       <div className="section">
+        <h3>Visualization</h3>
+        <div className="row">
+          <label className="k" style={{ minWidth: 90 }}>Atom scale</label>
+          <input
+            type="range"
+            min="0.3"
+            max="1.8"
+            step="0.05"
+            value={atomScale}
+            onChange={(e) => setAtomScale(parseFloat(e.target.value))}
+          />
+          <div className="small" style={{ width: 40, textAlign: 'right' }}>{atomScale.toFixed(2)}×</div>
+        </div>
+        <div className="small" style={{ marginTop: 6 }}>Adjust sphere radius to inspect crowded environments like layered oxides.</div>
+      </div>
+
+      <div className="section">
         <h3>Import / Export (.xyz)</h3>
+        <input
+          ref={xyzFileInputRef}
+          type="file"
+          accept=".xyz,.txt"
+          style={{ display: 'none' }}
+          onChange={onXYZFileInputChange}
+        />
         <div className="row" style={{ gap: 6, marginBottom: 6 }}>
           <button onClick={openXYZFromDisk}>Open .xyz…</button>
           <button onClick={exportXYZToDisk}>Save .xyz…</button>
@@ -210,19 +620,76 @@ function Panel({ atoms, setAtoms, selectedId, setSelectedId, gizmoMode, setGizmo
       </div>
 
       <div className="section">
+        <h3>Import CIF</h3>
+        <input
+          ref={cifFileInputRef}
+          type="file"
+          accept=".cif"
+          style={{ display: 'none' }}
+          onChange={onCIFFileInputChange}
+        />
+        <div className="row" style={{ gap: 6, marginBottom: 6 }}>
+          <button onClick={openCIFFromDisk}>Open .cif…</button>
+        </div>
+        <textarea
+          rows={8}
+          style={{ width: '100%' }}
+          value={cifText}
+          onChange={(e) => setCifText(e.target.value)}
+          placeholder={'Paste CIF content here to convert using the built-in parser.'}
+        />
+        <div className="row" style={{ gap: 6, marginTop: 6 }}>
+          <button className="primary" onClick={loadCIFFromText}>Load CIF</button>
+        </div>
+      </div>
+
+      <div className="section">
+        <h3>Quantum ESPRESSO</h3>
+        <div className="row">
+          <label className="k" style={{ minWidth: 80 }}>Prefix</label>
+          <input type="text" value={qePrefix} onChange={(e) => setQePrefix(e.target.value)} style={{ flex: 1 }} />
+        </div>
+        <div className="row" style={{ marginTop: 6 }}>
+          <label className="k" style={{ minWidth: 80 }}>Calculation</label>
+          <input type="text" value={qeCalculation} onChange={(e) => setQeCalculation(e.target.value)} style={{ flex: 1 }} />
+        </div>
+        <div className="row" style={{ marginTop: 6 }}>
+          <label className="k" style={{ minWidth: 80 }}>Pseudo suffix</label>
+          <input type="text" value={qePseudoSuffix} onChange={(e) => setQePseudoSuffix(e.target.value)} style={{ flex: 1 }} />
+        </div>
+        <div className="row" style={{ gap: 6, marginTop: 8 }}>
+          <button onClick={generateQEInput}>Generate QE input</button>
+          <button onClick={exportQEToDisk}>Save .in…</button>
+        </div>
+        <textarea
+          rows={8}
+          style={{ width: '100%', marginTop: 6 }}
+          value={qeText}
+          onChange={(e) => setQeText(e.target.value)}
+          placeholder={'Press "Generate QE input" to convert the current structure to a pw.x input deck.'}
+        />
+      </div>
+
+      <div className="section">
         <h3>Supercell</h3>
         <div className="small">Lattice vectors (Å) & replication.</div>
         <label className="k">a1</label>
         <div className="grid3">
-          {a1.map((v, i) => <input key={`a1${i}`} type="text" value={v} onChange={(e) => setA1(a1.map((x, j) => j === i ? Number(e.target.value) : x))} />)}
+          {lattice?.a1?.map((v, i) => (
+            <input key={`a1${i}`} type="text" value={v} onChange={(e) => setLatticeComponent('a1', i, e.target.value)} />
+          ))}
         </div>
         <label className="k">a2</label>
         <div className="grid3">
-          {a2.map((v, i) => <input key={`a2${i}`} type="text" value={v} onChange={(e) => setA2(a2.map((x, j) => j === i ? Number(e.target.value) : x))} />)}
+          {lattice?.a2?.map((v, i) => (
+            <input key={`a2${i}`} type="text" value={v} onChange={(e) => setLatticeComponent('a2', i, e.target.value)} />
+          ))}
         </div>
         <label className="k">a3</label>
         <div className="grid3">
-          {a3.map((v, i) => <input key={`a3${i}`} type="text" value={v} onChange={(e) => setA3(a3.map((x, j) => j === i ? Number(e.target.value) : x))} />)}
+          {lattice?.a3?.map((v, i) => (
+            <input key={`a3${i}`} type="text" value={v} onChange={(e) => setLatticeComponent('a3', i, e.target.value)} />
+          ))}
         </div>
         <div className="row" style={{ marginTop: 8 }}>
           <label className="k">nx</label><input type="text" value={nx} onChange={(e) => setNx(e.target.value)} style={{ width: 60 }} />
@@ -252,6 +719,8 @@ export default function App() {
   const [atoms, setAtoms] = useState(defaultAtoms())
   const [selectedId, setSelectedId] = useState(null)
   const [gizmoMode, setGizmoMode] = useState('translate')
+  const [lattice, setLattice] = useState({ a1: [3.615, 0, 0], a2: [0, 3.615, 0], a3: [0, 0, 3.615] })
+  const [atomScale, setAtomScale] = useState(1)
 
   return (
     <div className="app">
@@ -265,6 +734,8 @@ export default function App() {
             setSelectedId={setSelectedId}
             gizmoMode={gizmoMode}
             setGizmoMode={setGizmoMode}
+            lattice={lattice}
+            atomScale={atomScale}
           />
         </Canvas>
         <div className="hint">LMB select • G gizmo • Delete remove • Esc clear</div>
@@ -276,6 +747,10 @@ export default function App() {
         setSelectedId={setSelectedId}
         gizmoMode={gizmoMode}
         setGizmoMode={setGizmoMode}
+        lattice={lattice}
+        setLattice={setLattice}
+        atomScale={atomScale}
+        setAtomScale={setAtomScale}
       />
     </div>
   )
